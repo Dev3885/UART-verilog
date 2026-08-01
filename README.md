@@ -74,9 +74,15 @@ Developed and tested in Vivado (XSIM), but any simulator supporting standard `al
 ===============================================================================================
 ```
 
+## RTL Schematic
+
+Generated in Vivado via RTL Analysis → Open Elaborated Design → Schematic.
+
+
 ## Waveform
 
-Each run generates `UART.vcd`, viewable in Vivado's waveform viewer, GTKWave, or any VCD-compatible tool. In here waveform is particularly generated in vivado.
+Each run generates UART.vcd, viewable in Vivado's waveform viewer, GTKWave, or any VCD-compatible tool. in here Vivado is used.
+
 
 ## Known Limitations / Next Steps
 
