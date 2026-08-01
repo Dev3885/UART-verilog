@@ -16,7 +16,7 @@ always @(posedge clk) begin
         else rcount <= rcount + 1;  //otherwise count up.
     end
 end
-assign tick = (rcount == clk_per_bit16); //x16 faster than the agreed upon baud.
+assign tick = (rcount == clk_per_bit16 - 1); //x16 faster than the agreed upon baud.
 
 //pos count block
 always @(posedge clk) begin
