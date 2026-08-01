@@ -1,0 +1,165 @@
+/////Transmitter Line/////
+
+module counter #(parameter baud_rate = 9600,
+                 parameter clk_frequency = 50_000_000, //in MHz
+                 parameter clk_per_bit = (clk_frequency)/baud_rate, // _ helps numbers to be represented in a cleaner way like ,.
+                 parameter C = $clog2(clk_per_bit + 1)) //2^C = clk_per_bit; this is wrong. As 2^3 = 8; which needs 4 bits to represent
+(input wire clk, EN, clear, sent, output reg [C-1:0] count, output wire countingdone); 
+always @(posedge clk ) begin
+    // repeat (11) begin //   ---> whithin an edge <= cant be updated. Non-blocking assignments updates only after finishing the edge.
+    //while (count < 5208) begin   ---> whithin an edge <= cant be updated. Non-blocking assignments updates only after finishing the edge.
+        if (clear || countingdone) count <= 0;  //13'd0; ---> will be constant, and error will occur when parameters changes.
+        else if (sent) count <= 0; //when transmission is over.
+        else if (EN) count <= count + 1;  //13'd1;  ---> will be constant, and error will occur when parameters changes.
+    end   
+assign countingdone = (count == clk_per_bit - 1); //-1 because the digital counter starts counting from 0
+endmodule
+
+module register #(parameter Ii = 8)
+(input wire enable, input wire [Ii-1:0] Data, output reg [Ii-1:0] Q);
+always @(*) begin
+    if (enable) Q = Data;
+end
+endmodule
+
+module shiftregisterPISO #(parameter I = 8,
+                          parameter O = 11, 
+                          parameter B = $clog2(O + 1)) // change the input, output and bitcount accordingly. B = bits used to represent
+(input wire [I-1:0] data, input wire load, countingdone, clear, clk, output wire parity, start, q, stop, transmission, output reg [B-1:0] bitcount);
+assign parity = ^data;
+assign start = 0;
+assign stop = 1;
+reg [O-1:0] SR;
+//register DUT(.Q(data)); //instantiating the register once.  ---> cant instantiate a module inside a module.
+assign q = SR[0];
+assign transmission = (bitcount == O);
+always @(posedge clk) begin
+    // while (count <11) begin   ---> whithin an edge <= cant be updated. Non-blocking assignments updates only after finishing the edge.
+        //if (clear || transmission) SR[O-1:1] <= 0;  ---> cant do this together;
+        //As when transmission is 1, the bitcount needs to hold the value O, but in clear everything goes to 0.
+        if (clear) begin
+            SR <= {O{1'b1}};
+            bitcount <= O; //bitcount <= 0; ---> in this the system will think count has been reset, so it start shifting.
+        end else if (load) begin  //bitcount reset to 0.
+            SR <= {stop, parity, data, start};
+            bitcount <= 0; //count goes 0 only when there is something to send.
+            end  ////load is prioratized, because if Trnmsn is 1, load is also set to 1 on next cycle; causing a conflict.
+        else if (transmission) SR <= {O{1'b1}}; //bitcount holds the value untill next load.
+        else if (countingdone) begin // only triggers when 5208 counting is done.
+            SR <= {1'b0, SR[O-1:1]};
+            bitcount <= bitcount + 1; // 11'd1; ---> will be constant, and error will occur when parameters changes.
+        end
+    end
+endmodule
+
+
+
+
+
+
+
+////RCIEVER LINE////
+
+module Rcounter #(parameter clk_f = 50_000_000, //in MHz
+                  parameter baud = 9600,
+                  parameter oversample = 16, 
+                  parameter half_bit = oversample/2,
+                  parameter clk_per_bit16 = (clk_f)/(baud*oversample),
+                  parameter Co = $clog2(clk_per_bit16 + 1))
+(input wire clk, clear, CStart, output reg [Co-1:0] rcount, output reg [oversample-1:0] count_pos, output wire tick, sample);
+//counter block
+always @(posedge clk) begin
+    if (clear || ~CStart) begin //keep the count 0 when nothing is transmitting.
+        rcount <= 0;
+    end else if (CStart) begin //when transmission starts.
+        if (tick) rcount <= 0;  //if there is a tick reset the clk
+        else rcount <= rcount + 1;  //otherwise count up.
+    end
+end
+assign tick = (rcount == clk_per_bit16 - 1); //x16 faster than the agreed upon baud.
+
+//pos count block
+always @(posedge clk) begin
+    if (clear || ~CStart) count_pos <= 0; //keep the pos count 0 when nothing is transmitting.
+    else if (CStart && tick) begin //only when transmission is happening and tick is fired, 
+        if (count_pos == oversample - 1) count_pos <= 0;
+        else count_pos <= count_pos + 1;
+       // if (tick) count_pos <= count_pos + 1;  //if there is a tick, count up the pos
+        //else if (sample) count_pos <= 0;  //when 8th pos reached drop back to 0.  ---> this would fail to see the tick, as after sample <= 0 
+//it would start from 0 again and in that misses a cycle, and checks for the tick after one cycle it has origianlly happened . The system never goes to 16 at all.
+    end
+end
+assign sample = (count_pos == half_bit) && tick; //sampling at the mid. ---> there is no -1 caue it doesnt count to the end. &&tick ensure sample is high only at one cycle
+endmodule
+
+
+module shiftregisterSIPO #(parameter In = 8, //output bits.
+                           parameter A = 11, //recieved bits.
+                           parameter b = $clog2(A+1))
+(input wire clk, Rin, clear, shift, output reg [In-1:0] Rout, output wire recieved, output reg flag, idal, output reg [b-1:0] rbitcount);
+reg [A-1:0] sr; 
+reg [In-1:0] D; 
+//shiftregisterPISO DUT (.q(Rin)); //cant instantiate one module inside another one.
+
+//synchronus edge detection was needed  ---> WATCHING OVER A WIRE.
+reg Rpre, Rpre1;
+always @(posedge clk) begin
+    if (clear) begin
+        Rpre <= 1'b0; //clear the memory to start fresh, so no earlier states interfere.
+        Rpre1 <=1'b0; //clear the memory to start fresh, so no earlier states interfere.
+    end else begin
+        Rpre <= Rin; //has the present value
+        Rpre1 <= Rpre; //two way flip flop //Rpre keeps the metastable value and let it stable for a cycle. Rpre1 keeps the stable value (past).
+    end 
+end
+wire falling_E = ~Rpre & Rpre1; //detecting the falling edge. //for rising : ~Rpre & Rpre1
+//wire idal = (rbitcount == 0);   ---> the clk will not start ever, as rbitcount is depended upon the clk itself.
+wire watchman = falling_E & ~idal; //detecting if its the start bit or not. //idal = 0 ---> dont count, idal = 1 ---> count.
+assign recieved = (rbitcount == A); //as recieved affacts both the always block beneath, so its needs to be in a hirarchial high poition.
+//block for checking if its a start or not. HARD clear before every transmission and recieving.
+always @(posedge clk ) begin
+    if (clear) idal <= 1'b0; //keps the system idal as a falling edge approaches.
+    else if (watchman) idal <= 1'b1; //busy line.
+    else if (recieved) idal <= 1'b0; //line released.
+end
+
+//block for shifting
+always @(posedge clk) begin
+    if (clear)begin
+        sr <= {A{1'b0}};
+        rbitcount <= 0; //rbitcount <= A;   ---> this would trigger the recieved port on next edge, loading the wrong data to the regisster.
+    end else if (shift) begin
+        sr <= {Rin, sr[A-1:1]}; //sr <= {sr[A-1:1], Rin}; ---> this is stuck in one position just [0] gets changed.
+        rbitcount <= rbitcount + 1;
+    end
+end
+
+assign check = sr[A-2];  //the parity bit recieved check
+assign RParity = ^sr[A-3:1];  //parity check
+//block for flagg check
+always @(posedge clk) begin
+    if (clear) begin
+        //Rout <= {In{1'b0}};   ---> this would erase the data after one clk cycle that it arrives, so the data will be vanished magically.
+        flag <= 0;
+    end else if (rbitcount == A) begin
+        if (check != RParity) begin  //if parity doesn't match
+            Rout <= {In{1'b0}}; 
+            rbitcount <= 0; //reset count
+            flag <= 1;
+        end else begin
+            Rout <= sr[A-3:1];
+            sr <= {A{1'b0}}; 
+            rbitcount <= 0; //have to reset after loading to the register.
+            flag <= 0;
+        end
+    end
+end
+endmodule
+
+
+module Rregister #(parameter Z = 8)
+(input wire En, input wire [Z-1:0] D, output reg [Z-1:0] out);
+always @(*) begin
+    if (En) out = D;  //under procedural (*) block only blocking assignments are allowed.
+end
+endmodule
